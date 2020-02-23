@@ -58,11 +58,18 @@ __device__ inline uint32_t random_next_int(uint64_t *random) {
     return random_next(random, 31) % 3;
 }
 
-
 #define TOTAL_WORK_SIZE (1LL << 48)
 
 #define WORK_UNIT_SIZE (1LL << 20)
 #define BLOCK_SIZE 256
+
+__device__ inline int8_t extract(int32_t heightMap[], int32_t i) {
+    return (int8_t)(heightMap[(i) >> 2] >> ((i & 0b11) << 3) & 0xFF);
+}
+
+__device__ inline void increase(int32_t heightMap[], int32_t i) {
+    heightMap[i >> 2] += 1 << ((i & 0b11) << 3);
+}
 
 __global__ void crack(uint64_t seed_offset, int32_t *num_seeds, uint64_t *seeds) {
     uint64_t originalSeed = blockIdx.x * blockDim.x + threadIdx.x + seed_offset;
@@ -73,10 +80,10 @@ __global__ void crack(uint64_t seed_offset, int32_t *num_seeds, uint64_t *seeds)
     int16_t wantedCactusHeight = 8;
     int8_t floorLevel = 63;
     int16_t attemptsCount = 10;
-    int8_t heightMap[1024];
+    int32_t heightMap[256];
 
-    for (int32_t temp = 0; temp < 1024; temp++) {
-        heightMap[temp] = floorLevel;
+    for (int32_t temp = 0; temp < 256; temp++) {
+        heightMap[temp] = floorLevel | floorLevel << 8 | floorLevel << 16 | floorLevel << 24;
     }
 
     int16_t currentHighestPos = 0;
@@ -89,12 +96,12 @@ __global__ void crack(uint64_t seed_offset, int32_t *num_seeds, uint64_t *seeds)
 
     for (i = 0; i < attemptsCount; i++) {
         // Keep, most threads finish early this way
-        if (wantedCactusHeight - heightMap[currentHighestPos] + floorLevel > 9 * (attemptsCount - i))
+        if (wantedCactusHeight - extract(heightMap, currentHighestPos) + floorLevel > 9 * (attemptsCount - i))
             return;
 
         initialPosX = random_next(&seed, 4) + 8;
         initialPosZ = random_next(&seed, 4) + 8;
-        terrainHeight = (heightMap[initialPosX + initialPosZ * 32] + 1) * 2;
+        terrainHeight = (extract(heightMap, initialPosX + initialPosZ * 32) + 1) * 2;
 
         initialPosY = next_int_unknown(&seed, terrainHeight);
 
@@ -105,27 +112,27 @@ __global__ void crack(uint64_t seed_offset, int32_t *num_seeds, uint64_t *seeds)
 
             posMap = posX + posZ * 32;
             // Keep
-            if (posY <= heightMap[posMap] && posY >= 0)
+            if (posY <= extract(heightMap, posMap) && posY >= 0)
                 continue;
 
             offset = 1 + next_int_unknown(&seed, random_next_int(&seed) + 1);
 
             for (j = 0; j < offset; j++) {
-                if ((posY + j - 1) > heightMap[posMap] || posY < 0)    continue;
-                if ((posY + j) <= heightMap[(posX + 1) + posZ * 32] && posY >= 0) continue;
-                if ((posY + j) <= heightMap[posX + (posZ - 1) * 32] && posY >= 0) continue;
-                if ((posY + j) <= heightMap[(posX - 1) + posZ * 32] && posY >= 0) continue;
-                if ((posY + j) <= heightMap[posX + (posZ + 1) * 32] && posY >= 0) continue;
+                if ((posY + j - 1) > extract(heightMap, posMap) || posY < 0) continue;
+                if ((posY + j) <= extract(heightMap, (posX + 1) + posZ * 32) && posY >= 0) continue;
+                if ((posY + j) <= extract(heightMap, posX + (posZ - 1) * 32) && posY >= 0) continue;
+                if ((posY + j) <= extract(heightMap, (posX - 1) + posZ * 32) && posY >= 0) continue;
+                if ((posY + j) <= extract(heightMap, posX + (posZ + 1) * 32) && posY >= 0) continue;
 
-                heightMap[posMap]++;
+                increase(heightMap, posMap);
 
-                if (heightMap[currentHighestPos] < heightMap[posMap]) {
+                if (extract(heightMap, currentHighestPos) < extract(heightMap, posMap)) {
                     currentHighestPos = posMap;
                 }
             }
         }
 
-        if (heightMap[currentHighestPos] - floorLevel >= wantedCactusHeight) {
+        if (extract(heightMap, currentHighestPos) - floorLevel >= wantedCactusHeight) {
             int32_t index = atomicAdd(num_seeds, 1);
             seeds[index] = originalSeed;
             return;
