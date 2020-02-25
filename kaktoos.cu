@@ -14,31 +14,13 @@
 #include <__clang_cuda_cmath.h>
 #endif
 
-
-
 #include <stdint.h>
 #include <memory.h>
 #include <stdio.h>
 #include <time.h>
 
-#undef JRAND_DOUBLE
-
 #define RANDOM_MULTIPLIER_LONG 0x5DEECE66DULL
 
-#ifdef JRAND_DOUBLE
-#define Random double
-#define RANDOM_MULTIPLIER 0x5DEECE66Dp-48
-#define RANDOM_ADDEND 0xBp-48
-#define RANDOM_SCALE 0x1p-48
-
-inline uint32_t random_next(Random *random, int32_t bits) {
-    *random = trunc((*random * RANDOM_MULTIPLIER + RANDOM_ADDEND) * RANDOM_SCALE);
-    return (uint32_t)((uint64_t)(*random / RANDOM_SCALE) >> (48 - bits));
-}
-
-#else
-
-#define Random uint64_t
 #define RANDOM_MULTIPLIER RANDOM_MULTIPLIER_LONG
 #define RANDOM_ADDEND 0xBULL
 #define RANDOM_MASK ((1ULL << 48) - 1)
@@ -47,17 +29,16 @@ inline uint32_t random_next(Random *random, int32_t bits) {
 #define FAST_NEXT_INT
 
 // Random::next(bits)
-__host__ __device__ inline uint32_t random_next(Random *random, int32_t bits) {
+__device__ inline uint32_t random_next(uint64_t *random, int32_t bits) {
     *random = (*random * RANDOM_MULTIPLIER + RANDOM_ADDEND) & RANDOM_MASK;
     return (uint32_t)(*random >> (48 - bits));
 }
-#endif // ~JRAND_DOUBLE
 
 // new Random(seed)
 #define get_random(seed) ((Random)((seed ^ RANDOM_MULTIPLIER_LONG) & RANDOM_MASK))
 #define get_random_unseeded(state) ((Random) ((state) * RANDOM_SCALE))
 
-__host__ __device__ int32_t next_int_unknown(uint64_t *seed, int16_t bound) {
+__device__ int32_t next_int_unknown(uint64_t *seed, int16_t bound) {
     if ((bound & -bound) == bound) {
         *seed = (*seed * RANDOM_MULTIPLIER + RANDOM_ADDEND) & RANDOM_MASK;
         return (int32_t)((bound * (*seed >> 17)) >> 31);
@@ -73,89 +54,85 @@ __host__ __device__ int32_t next_int_unknown(uint64_t *seed, int16_t bound) {
 }
 
 // Random::nextInt(bound)
-__host__ __device__ inline uint32_t random_next_int(Random *random, uint32_t bound) {
-    int r = random_next(random, 31);
-    int m = bound - 1;
-    if ((bound & m) == 0) {
-        r = (uint32_t)((bound * (uint64_t)r) >> 31);
-    } else {
-#ifdef FAST_NEXT_INT
-        r %= bound;
-#else
-        for (int32_t u = r;
-            u - (r = u % bound) + m < 0;
-            u = random_next(random, 31));
-#endif
-    }
-    return r;
+__device__ inline uint32_t random_next_int(uint64_t *random) {
+    return random_next(random, 31) % 3;
 }
 
-
-#define TOTAL_WORK_SIZE 1LL << 48
+#define TOTAL_WORK_SIZE (1LL << 48)
 
 #define WORK_UNIT_SIZE (1LL << 20)
 #define BLOCK_SIZE 256
+
+__device__ inline int8_t extract(int32_t heightMap[], int32_t i) {
+    return (int8_t)(heightMap[(i) >> 2] >> ((i & 0b11) << 3) & 0xFF);
+}
+
+__device__ inline void increase(int32_t heightMap[], int32_t i) {
+    heightMap[i >> 2] += 1 << ((i & 0b11) << 3);
+}
 
 __global__ void crack(uint64_t seed_offset, int32_t *num_seeds, uint64_t *seeds) {
     uint64_t originalSeed = blockIdx.x * blockDim.x + threadIdx.x + seed_offset;
     if (originalSeed >= TOTAL_WORK_SIZE)
         return;
     uint64_t seed = originalSeed;
-    
+
     int16_t wantedCactusHeight = 8;
-    int16_t floorLevel = 63;
+    int8_t floorLevel = 63;
     int16_t attemptsCount = 10;
-    int16_t heightMap[1024];
-    
-    for (int32_t temp = 0; temp < 1024; temp++) {
-        heightMap[temp] = floorLevel;
+    int32_t heightMap[256];
+
+    for (int32_t temp = 0; temp < 256; temp++) {
+        heightMap[temp] = floorLevel | floorLevel << 8 | floorLevel << 16 | floorLevel << 24;
     }
-    
+
     int16_t currentHighestPos = 0;
     int16_t terrainHeight;
     int16_t initialPosX, initialPosY, initialPosZ;
     int16_t posX, posY, posZ;
     int16_t offset, posMap;
-    
+
     int16_t i, a, j;
-    
+
     for (i = 0; i < attemptsCount; i++) {
-        if (wantedCactusHeight - heightMap[currentHighestPos] + floorLevel > 9 * (attemptsCount - i))
+        // Keep, most threads finish early this way
+        if (wantedCactusHeight - extract(heightMap, currentHighestPos) + floorLevel > 9 * (attemptsCount - i))
             return;
-            
+
         initialPosX = random_next(&seed, 4) + 8;
         initialPosZ = random_next(&seed, 4) + 8;
-        terrainHeight = (heightMap[initialPosX + initialPosZ * 32] + 1) * 2;
-        
+        terrainHeight = (extract(heightMap, initialPosX + initialPosZ * 32) + 1) * 2;
+
         initialPosY = next_int_unknown(&seed, terrainHeight);
-        
+
         for (a = 0; a < 10; a++) {
             posX = initialPosX + random_next(&seed, 3) - random_next(&seed, 3);
             posY = initialPosY + random_next(&seed, 2) - random_next(&seed, 2);
             posZ = initialPosZ + random_next(&seed, 3) - random_next(&seed, 3);
-            
-            if (posY <= heightMap[posX + posZ * 32] && posY >= 0)
-                continue;
-            
-            offset = 1 + next_int_unknown(&seed, random_next_int(&seed, 3) + 1);
+
             posMap = posX + posZ * 32;
-            
+            // Keep
+            if (posY <= extract(heightMap, posMap) && posY >= 0)
+                continue;
+
+            offset = 1 + next_int_unknown(&seed, random_next_int(&seed) + 1);
+
             for (j = 0; j < offset; j++) {
-                if ((posY + j - 1) > heightMap[posX + posZ * 32] || posY < 0) continue;
-                if((posY + j) <= heightMap[(posX + 1) + posZ * 32] && posY >= 0)continue;
-                if((posY + j) <= heightMap[(posX - 1) + posZ * 32] && posY >= 0)continue;
-                if((posY + j) <= heightMap[posX + (posZ + 1) * 32] && posY >= 0)continue;
-                if((posY + j) <= heightMap[posX + (posZ - 1) * 32] && posY >= 0)continue;
-                
-                heightMap[posMap]++;
-                
-                if (heightMap[currentHighestPos] < heightMap[posMap]) {
+                if ((posY + j - 1) > extract(heightMap, posMap) || posY < 0) continue;
+                if ((posY + j) <= extract(heightMap, (posX + 1) + posZ * 32) && posY >= 0) continue;
+                if ((posY + j) <= extract(heightMap, posX + (posZ - 1) * 32) && posY >= 0) continue;
+                if ((posY + j) <= extract(heightMap, (posX - 1) + posZ * 32) && posY >= 0) continue;
+                if ((posY + j) <= extract(heightMap, posX + (posZ + 1) * 32) && posY >= 0) continue;
+
+                increase(heightMap, posMap);
+
+                if (extract(heightMap, currentHighestPos) < extract(heightMap, posMap)) {
                     currentHighestPos = posMap;
                 }
             }
         }
-        
-        if (heightMap[currentHighestPos] - floorLevel >= wantedCactusHeight) {
+
+        if (extract(heightMap, currentHighestPos) - floorLevel >= wantedCactusHeight) {
             int32_t index = atomicAdd(num_seeds, 1);
             seeds[index] = originalSeed;
             return;
@@ -206,7 +183,7 @@ int main() {
             cudaDeviceSynchronize();
 
             for (int32_t i = 0, e = *nodes[gpu_index].num_seeds; i < e; i++) {
-                fprintf(out_file, "%lld\n", nodes[gpu_index].seeds[i]);
+                fprintf(out_file, "%lld\n", (long long int)nodes[gpu_index].seeds[i]);
             }
             fflush(out_file);
             count += *nodes[gpu_index].num_seeds;
@@ -216,7 +193,7 @@ int main() {
         int timeElapsed = (int)(currentTime - startTime);
         uint64_t numSearched = offset + WORK_UNIT_SIZE;
         double speed = (double)numSearched / (double)timeElapsed / 1000000.0;
-        printf("Searched %lld seeds, found %lld matches . Time elapsed: %ds. Speed: %.2fm seeds/s.\n", numSearched, count, timeElapsed, speed);
+        printf("Searched %lld seeds, found %lld matches . Time elapsed: %ds. Speed: %.2fm seeds/s.\n", (long long int)numSearched, (long long int)count, timeElapsed, speed);
     }
 
     fclose(out_file);
