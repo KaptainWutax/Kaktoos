@@ -164,6 +164,10 @@ void setup_gpu_node(GPU_Node* node, int32_t gpu) {
     cudaMallocManaged(&node->seeds, (1LL << 10)); // approx 1kb
 }
 
+#ifndef OFFSET
+#define OFFSET 0
+#endif
+
 GPU_Node nodes[GPU_COUNT];
 int32_t processed[GPU_COUNT];
 uint64_t offset = 0;
