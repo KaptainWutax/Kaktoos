@@ -212,7 +212,7 @@ int main() {
     while (offset < TOTAL_WORK_SIZE) {
         time(&currentTime);
         int timeElapsed = (int)(currentTime - startTime);
-        double speed = (double)offset / (double)timeElapsed / 1000000.0;
+        double speed = (double)(offset - OFFSET) / (double)timeElapsed / 1000000.0;
         printf("Searched %lld seeds, offset: %lld found %lld matches. Time elapsed: %ds. Speed: %.2fm seeds/s. %f%%\n",
             (long long int)(offset - OFFSET), (long long int)offset, (long long int)count, timeElapsed, speed, (double)offset / TOTAL_WORK_SIZE * 100);
         std::this_thread::sleep_for(0.5s);
